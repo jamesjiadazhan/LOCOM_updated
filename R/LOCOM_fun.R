@@ -95,29 +95,27 @@ locom <- function(otu.table, Y, C = NULL,
                   n.perm.max = NULL, n.rej.stop = 100, n.cores = 4, ref.otu = NULL,
                   adjustment = "BH", Firth.thresh = 0.4){
     
-    # remove zero OTUs
-    
+    # Remove OTUs with zero counts based on the prevalence cut-off
     w = which(colSums(otu.table>0)>= prev.cut * nrow(otu.table))
     if (length(w) < ncol(otu.table)) {
         cat(paste(ncol(otu.table)-length(w), 'OTU(s) with fewer than', prev.cut * nrow(otu.table), 'in all samples are removed', sep=" "), "\n")
         otu.table = otu.table[,w,drop=FALSE]
     }
     
+    # Set the number of samples and OTUs
     n.sam <- nrow(otu.table)
     n.otu <- ncol(otu.table)
     
-    # find reference OTU
-    
+    # Find the reference OTU
     if (is.null(ref.otu)) {
-        mean.freq <- colMeans(otu.table/rowSums(otu.table))
+        mean.freq <- colMeans(otu.table/rowSums(otu.table), na.rm = TRUE)
         ref.otu <- which.max(mean.freq)
     }
-    otu.table[which(otu.table[,ref.otu]==0), ref.otu] <- 1 # replace 0 by 1
+
+    # Replace zeros with ones in the reference OTU
+    otu.table[which(otu.table[,ref.otu]==0), ref.otu] <- 1
     
-    # -----------------------
-    # Observed statistic
-    # -----------------------
-    
+    # Calculate observed statistics
     if (is.null(C) == TRUE) {
         X <- cbind(Y, 1)
         Yr <- Y
@@ -126,6 +124,7 @@ locom <- function(otu.table, Y, C = NULL,
         Yr <- resid(lm(Y ~ C))
     }
     
+    # Calculate the frequency table for the reference OTU
     freq.table.ref <- otu.table/(otu.table + otu.table[,ref.otu])
     n.X <- ncol(X)
     XX <- CalculateXX(X)
@@ -134,7 +133,7 @@ locom <- function(otu.table, Y, C = NULL,
     iter_max = 50
     prop.presence <- colMeans(otu.table>0)
     
-    
+    # Calculate the observed results
     res.obs <- tryCatch(
             {
             Newton(freq_table = freq.table.ref, X = X, XX = XX, 
@@ -153,6 +152,7 @@ locom <- function(otu.table, Y, C = NULL,
         return(NA)
     }
     
+    # Set initial beta values
     beta <- res.obs[1,]
     beta <- beta - median(beta)
     
@@ -166,8 +166,10 @@ locom <- function(otu.table, Y, C = NULL,
     if (is.null(seed)) seed = sample(1:10^6, 1)
     set.seed(seed)
     
+    # Set the maximum number of permutations if not provided
     if (is.null(n.perm.max)) n.perm.max = n.otu * n.rej.stop * (1/fdr.nominal)
     
+    # Initialize variables for storing permutation results
     beta.perm <- array(NA, dim = c(n.perm.max, n.otu))
     n.rej.otu.left <- rep(0, n.otu)
     n.rej.otu.right <- rep(0, n.otu)
@@ -176,7 +178,7 @@ locom <- function(otu.table, Y, C = NULL,
     n.block <- n.perm.max/n.perm.block
     n.perm.core <- n.perm.block/n.cores
     
-    
+    # Define function for parallel permutations
     parallel.perm <- function(i) {
         tryCatch(
             {
@@ -192,15 +194,17 @@ locom <- function(otu.table, Y, C = NULL,
         )    
     } # parallel.perm
 
-    
+    # Perform permutations in blocks
     n.perm.completed <- 0
     
     for(i.block in 1:n.block){
         
+        # Generate permutation matrix
         perm.mat <- t(shuffleSet(n.sam, n.perm.block)) - 1
         
         cat("permutations:", n.perm.completed + 1, "\n")
         
+        # Perform parallel permutations if multiple cores are available
         if (n.cores > 1) {
             
             if (Sys.info()[['sysname']] == 'Windows') {
@@ -209,9 +213,8 @@ locom <- function(otu.table, Y, C = NULL,
                 parallel.stat = mclapply(0:(n.cores - 1), parallel.perm, mc.cores = n.cores)
             }
             
-            # check whether there is any error in a single core
+            # Check for errors in a single core
             error.list <- unlist(lapply(parallel.stat, function(x) any(is.na(x) == TRUE)))
-            # if there is a error, then print out message and error
             if(sum(error.list) > 0){
                 error.idx <- min(which(error.list == TRUE))
                 message("Warning: There may be too few read count at a level of covariate value(s) (i.e., separation issue). You may increase the Firth.thresh value (e.g., to 1) and fit the model again.")
@@ -222,6 +225,7 @@ locom <- function(otu.table, Y, C = NULL,
             res.perm <- do.call(rbind, parallel.stat)
             
         } else {
+            # Perform single-core permutations
             res.perm <- tryCatch(
                             {
                                 perm_Newton(freq_table = freq.table.ref, Yr = Yr, X = X, XX = XX,
@@ -237,28 +241,46 @@ locom <- function(otu.table, Y, C = NULL,
                                 return(NA)
                             }
                        )
+            # Check for errors in single-core permutation
             if(any(is.na(res.perm)) == TRUE){
                 return(NA)
             }
         }
         
+        # Update the number of permutations completed
         n.perm.completed <- i.block*n.perm.block
         n.perm.completed.inv <- 1 / (n.perm.completed+1)
         
+        # Diagnostic information for debugging
+        cat("Value of i.block:", i.block, "\n")
+        cat("Value of n.perm.block:", n.perm.block, "\n")
+        cat("Value of n.perm.completed:", n.perm.completed, "\n")
+        cat("Length of w:", length(w), "\n")
+
+        # Update indices for storing permutation results
         w <- ((i.block-1)*n.perm.block+1):n.perm.completed
+
+        # Diagnostic information for debugging
+        cat("Dimensions of beta.perm:", dim(beta.perm), "\n")
+        cat("Dimensions of res.perm:", dim(res.perm), "\n")
+
+        # Store permutation results
         beta.perm[w,] <- res.perm
         beta.perm[w,] <- beta.perm[w,] - apply(beta.perm[w,], 1, median)
         
+        # Update rejection counts for left and right tails
         n.rej.otu.left <- n.rej.otu.left + rowSums(beta>=t(beta.perm[w,]))
         n.rej.otu.right <- n.rej.otu.right + rowSums(beta<=t(beta.perm[w,]))
         n.rej.otu <- 2*pmin(n.rej.otu.left+1, n.rej.otu.right+1)
         p.otu <- n.rej.otu * n.perm.completed.inv
         q.otu <- fdr.Sandev(p.otu)
         
+        # Stop permutations if all OTUs are detected or maximum rejections are reached
         if (all(q.otu <= fdr.nominal | n.rej.otu >= n.rej.stop)) break
         
     } # permutation
-    
+
+    # Adjust p-values using Benjamini-Hochberg method
     if(adjustment == "BH"){
         q.otu <- p.adjust(p.otu, method = "BH")
     }
@@ -268,14 +290,17 @@ locom <- function(otu.table, Y, C = NULL,
     # Global p-value
     # ------------------------
     
+    # Combine observed and permuted beta values
     beta.all <- rbind(beta, beta.perm)
     
+    # Compute global p-values
     p.otu1 <- apply( beta.all, 2, function(x) 0.5*(2*pmin(rank(x), n.perm.completed +2-rank(x))*2-3)*n.perm.completed.inv )
     
+    # Compute global test statistic and p-value
     stat.global <- rowSums(1/p.otu1)
     p.global <- (sum(stat.global[1] <= stat.global[-1]) + 1) * n.perm.completed.inv
     
-    
+    # Format output
     otu.names <- colnames(otu.table)
     beta <- matrix(beta, nrow = 1)
     p.otu <- matrix(p.otu, nrow = 1)
@@ -284,7 +309,7 @@ locom <- function(otu.table, Y, C = NULL,
     colnames(p.otu) <- otu.names
     colnames(q.otu) <- otu.names
     
-    
+    # Return results
     return(list(effect.size = beta,
                 p.otu = p.otu,
                 q.otu = q.otu,
@@ -295,21 +320,24 @@ locom <- function(otu.table, Y, C = NULL,
     
 } # locom
 
-
+# Function to calculate FDR-adjusted p-values using Sandev's method
 fdr.Sandev = function(p.otu) {
-    m = length(p.otu)
-    p.otu.sort = sort(p.otu)
-    n.otu.detected = seq(1, m)
-    pi0 = min(1, 2/m*sum(p.otu))
+    m = length(p.otu)  # Number of p-values
+    p.otu.sort = sort(p.otu)  # Sort p-values
+    n.otu.detected = seq(1, m)  # Detected OTU sequence
+    pi0 = min(1, 2/m*sum(p.otu))  # Estimate proportion of true null hypotheses
 
+    # Compute sorted q-values
     qval.sort = m * pi0 * p.otu.sort / n.otu.detected
     j.min.q = 1
+    # Adjust q-values using Sandev's method
     while (j.min.q < m) {
-        min.q = min( qval.sort[j.min.q:m] )
-        new.j.min.q = (j.min.q-1) + max( which(qval.sort[j.min.q:m]==min.q) )
+        min.q = min(qval.sort[j.min.q:m])
+        new.j.min.q = (j.min.q-1) + max(which(qval.sort[j.min.q:m]==min.q))
         qval.sort[j.min.q:new.j.min.q] = qval.sort[new.j.min.q]
         j.min.q = new.j.min.q+1
     }
+    # Match original p-values to adjusted q-values
     mat = match(p.otu, p.otu.sort)
     qval.orig = qval.sort[mat]
     results = qval.orig
@@ -317,6 +345,7 @@ fdr.Sandev = function(p.otu) {
     return(results)
 
 } # fdr.Sandev
+
 
 
 
